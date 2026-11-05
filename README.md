@@ -26,3 +26,13 @@ Python（Streamlit / NetworkX / Typer）+ 前端 React（Vite + TypeScript）。
 python ai_cli.py --help
 streamlit run app.py
 ```
+
+## 环境变量（审计后新增）
+
+| 变量 | 默认 | 作用 |
+|---|---|---|
+| `CORS_ORIGINS` | `http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173` | CORS 白名单，逗号分隔。原来是 `*`（配合 `allow_credentials=True` 实际会被浏览器拒绝） |
+| `MAX_UPLOAD_MB` | `5` | 上传 txt 上限，超了返回 413，不会整份读进内存 |
+| `TASKS_DB_PATH` | `tasks.db` | 任务状态 SQLite 路径。原来是进程内 dict：多 worker 不共享、重启即丢 |
+
+> 说明：SQLite 只解决"重启不丢"。多 worker / 多实例部署仍应换 Redis/Postgres 或独立任务队列。

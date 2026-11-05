@@ -1,4 +1,6 @@
+import json
 import os
+import sqlite3
 import uuid
 import time
 from typing import Dict, Any, Optional
@@ -21,17 +23,77 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# 允许跨域请求，方便前端联调
+
+def _cors_origins() -> list[str]:
+    """CORS 白名单。
+
+    审计项：原来是 allow_origins=["*"] + allow_credentials=True —— 浏览器规范下
+    这两个组合会被直接拒绝，而且等于对任意站点开放读接口。
+    现在默认只放行本地前端；需要别的来源请设 CORS_ORIGINS（逗号分隔）。
+    """
+    raw = os.getenv("CORS_ORIGINS", "").strip()
+    if raw:
+        return [o.strip() for o in raw.split(",") if o.strip()]
+    return [
+        "http://localhost:3000", "http://127.0.0.1:3000",
+        "http://localhost:5173", "http://127.0.0.1:5173",
+    ]
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# 内存中的任务存储 (MVP阶段使用，生产环境应使用 Redis/PostgreSQL)
-tasks_db: Dict[str, Dict[str, Any]] = {}
+# 上传大小上限（MB），避免把整个文件读进内存
+MAX_UPLOAD_MB = float(os.getenv("MAX_UPLOAD_MB", "5"))
+
+
+class TaskStore:
+    """任务状态存储。
+
+    审计项：原来是进程内 dict —— 多 worker 不共享、重启即丢。
+    这里换成 SQLite（同进程单文件），至少做到**跨重启可恢复**；
+    多 worker 部署仍建议换 Redis/Postgres，这一点写在 docstring 里而不是假装解决。
+    """
+
+    def __init__(self, path: str):
+        self.path = path
+        self._conn = sqlite3.connect(path, check_same_thread=False)
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS tasks (task_id TEXT PRIMARY KEY, data TEXT NOT NULL)"
+        )
+        self._conn.commit()
+
+    def create(self, task: Dict[str, Any]) -> None:
+        self._conn.execute(
+            "INSERT OR REPLACE INTO tasks (task_id, data) VALUES (?, ?)",
+            (task["task_id"], json.dumps(task, ensure_ascii=False)),
+        )
+        self._conn.commit()
+
+    def get(self, task_id: str) -> Optional[Dict[str, Any]]:
+        row = self._conn.execute(
+            "SELECT data FROM tasks WHERE task_id = ?", (task_id,)
+        ).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def update(self, task_id: str, **fields: Any) -> None:
+        task = self.get(task_id)
+        if task is None:
+            return
+        task.update(fields)
+        self.create(task)
+
+    def close(self) -> None:
+        self._conn.close()
+
+
+TASKS_DB_PATH = os.getenv("TASKS_DB_PATH", "tasks.db")
+tasks_db = TaskStore(TASKS_DB_PATH)
 
 # 全局单例 RAG 知识库，避免重复冷启动
 rag_db_instance = None
@@ -56,8 +118,7 @@ class TaskStatusResponse(BaseModel):
 def run_analysis_task(task_id: str, text: str, book_name: str):
     """后台异步任务：运行叙事分析流水线"""
     try:
-        tasks_db[task_id]["status"] = "processing"
-        tasks_db[task_id]["message"] = "正在初始化 AI 引擎..."
+        tasks_db.update(task_id, status="processing", message="正在初始化 AI 引擎...")
         
         # 将文本拆分为段落
         paragraphs = [p.strip() for p in text.split('\n') if len(p.strip()) > 5]
@@ -83,23 +144,27 @@ def run_analysis_task(task_id: str, text: str, book_name: str):
             explicit_mapping=get_character_mapping(book_name)
         )
         
-        tasks_db[task_id]["message"] = "正在深度阅读文本并进行实体与关系抽取 (这可能需要较长时间)..."
-        tasks_db[task_id]["progress"] = 10.0
+        tasks_db.update(
+            task_id,
+            message="正在深度阅读文本并进行实体与关系抽取 (这可能需要较长时间)...",
+            progress=10.0,
+        )
         
         # 运行分析 (这里如果需要真实进度条，需重构 pipeline.run 支持 callback，目前为了 MVP 简化处理)
         # TODO: 注入进度回调 callback 给 pipeline
         results = pipeline.run(paragraphs, verbose=False)
         
-        tasks_db[task_id]["status"] = "completed"
-        tasks_db[task_id]["progress"] = 100.0
-        tasks_db[task_id]["message"] = "分析完成"
-        tasks_db[task_id]["completed_at"] = time.time()
-        # 转换 results 为 dict
-        tasks_db[task_id]["results"] = results.model_dump()
+        tasks_db.update(
+            task_id,
+            status="completed",
+            progress=100.0,
+            message="分析完成",
+            completed_at=time.time(),
+            results=results.model_dump(),
+        )
         
     except Exception as e:
-        tasks_db[task_id]["status"] = "failed"
-        tasks_db[task_id]["message"] = f"分析失败: {str(e)}"
+        tasks_db.update(task_id, status="failed", message=f"分析失败: {str(e)}")
         print(f"Task {task_id} failed: {e}")
 
 @app.post("/api/v1/tasks/upload", response_model=TaskStatusResponse)
@@ -111,8 +176,15 @@ async def upload_and_analyze(
     """上传文本文件并创建分析任务"""
     if not file.filename.endswith(".txt"):
         raise HTTPException(status_code=400, detail="Only .txt files are supported currently.")
-        
-    content = await file.read()
+
+    # 先按上限+1 字节读，超了就 413，不把超大文件整个吞进内存
+    limit = int(MAX_UPLOAD_MB * 1024 * 1024)
+    content = await file.read(limit + 1)
+    if len(content) > limit:
+        raise HTTPException(
+            status_code=413,
+            detail=f"文件超过 {MAX_UPLOAD_MB} MB 上限（可用 MAX_UPLOAD_MB 调整）",
+        )
     try:
         text = content.decode("utf-8")
     except UnicodeDecodeError:
@@ -124,7 +196,7 @@ async def upload_and_analyze(
     task_id = str(uuid.uuid4())
     current_time = time.time()
     
-    tasks_db[task_id] = {
+    task = {
         "task_id": task_id,
         "status": "pending",
         "progress": 0.0,
@@ -132,18 +204,19 @@ async def upload_and_analyze(
         "book_name": book,
         "created_at": current_time,
     }
+    tasks_db.create(task)
     
     background_tasks.add_task(run_analysis_task, task_id, text, book)
     
-    return TaskStatusResponse(**tasks_db[task_id])
+    return TaskStatusResponse(**task)
 
 @app.get("/api/v1/tasks/{task_id}/status", response_model=TaskStatusResponse)
 async def get_task_status(task_id: str):
     """获取指定任务的状态与进度"""
-    if task_id not in tasks_db:
+    task_info = tasks_db.get(task_id)
+    if task_info is None:
         raise HTTPException(status_code=404, detail="Task not found")
         
-    task_info = tasks_db[task_id].copy()
     # 如果任务未完成，不返回完整的 results 以减少网络传输
     if task_info["status"] != "completed":
         task_info["results"] = None
@@ -153,22 +226,23 @@ async def get_task_status(task_id: str):
 @app.get("/api/v1/tasks/{task_id}/results")
 async def get_task_results(task_id: str):
     """获取指定任务的完整分析结果"""
-    if task_id not in tasks_db:
+    task_info = tasks_db.get(task_id)
+    if task_info is None:
         raise HTTPException(status_code=404, detail="Task not found")
         
-    if tasks_db[task_id]["status"] != "completed":
+    if task_info["status"] != "completed":
         raise HTTPException(status_code=400, detail="Task is not completed yet")
         
-    return tasks_db[task_id]["results"]
+    return task_info["results"]
 
 from src.simulation.sandbox import SandboxRequest, MultiAgentSandbox
 
 @app.post("/api/v1/simulation/run")
 async def run_simulation(req: SandboxRequest):
-    if req.task_id not in tasks_db:
+    task_data = tasks_db.get(req.task_id)
+    if task_data is None:
         raise HTTPException(status_code=404, detail="Task not found")
         
-    task_data = tasks_db[req.task_id]
     if task_data["status"] != "completed":
         raise HTTPException(status_code=400, detail="Task is not completed yet")
         
@@ -202,8 +276,9 @@ async def rag_chat(req: ChatRequest):
         
         # 2. 图谱检索 (Graph RAG)
         graph_context = ""
-        if req.task_id and req.task_id in tasks_db and tasks_db[req.task_id]["status"] == "completed":
-            graph_data = tasks_db[req.task_id]["results"]["network_analysis"]["graph_data"]
+        task_for_graph = tasks_db.get(req.task_id) if req.task_id else None
+        if task_for_graph and task_for_graph["status"] == "completed":
+            graph_data = task_for_graph["results"]["network_analysis"]["graph_data"]
             nodes = [n["id"] for n in graph_data.get("nodes", [])]
             # 简单的实体链接：看 query 中命中了哪些人物节点
             matched_entities = [n for n in nodes if n in req.query]

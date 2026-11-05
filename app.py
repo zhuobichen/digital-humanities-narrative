@@ -72,7 +72,7 @@ def render_network_graph(network_data, width="100%", height="600px"):
 
     # 从内存重建边信息 (这里简化处理，在实际重构中应直接传递边数据)
     # 因为原分析结果中 network_data 未直接暴露所有边，我们需要从 pipeline 获取
-    if "G_edges" in st.session_session_state:
+    if "G_edges" in st.session_state:
         for u, v, data in st.session_state.G_edges:
             weight = data.get("weight", 1)
             links.append({
