@@ -12,6 +12,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 
 from ..models import Relation
 from ..interfaces import BaseRelationshipExtractor
+from .sentence_relations import extract_sentence_relations
 
 class LLMRelationshipExtractor(BaseRelationshipExtractor):
     """基于大模型的人物关系抽取器"""
@@ -245,17 +246,43 @@ class RelationshipExtractor(BaseRelationshipExtractor):
         }
 
     def extract_relations(
-        self, text: str, characters: list[str]
+        self, text: str, characters: list[str], min_cooccur: int = 1, directed: bool = True
     ) -> List[Relation]:
         """从文本中抽取人物关系
 
         Args:
             text: 输入文本
-            characters: 人物列表
+            characters: 人物列表（已合并别名的规范名）
+            min_cooccur: 同一关系至少出现几次才保留，默认 1
+            directed: True 用"主体—动词—客体"语序定方向（`directed_relations`），
+                False 退回句内共现的句级版本（`sentence_relations`）
 
         Returns:
-            Relation 对象列表
+            Relation 对象列表，按权重降序
         """
+        if directed:
+            from .directed_relations import extract_directed_relations
+
+            extracted = extract_directed_relations(text, characters, min_cooccur)
+        else:
+            extracted = extract_sentence_relations(text, characters, min_cooccur)
+        return [
+            Relation(
+                source=item["source"],
+                target=item["target"],
+                type=item["type"],
+                context_snippet=item["evidence"],
+                context=item["evidence"],
+                position=idx,
+                location="未知",
+            )
+            for idx, item in enumerate(extracted)
+        ]
+
+    def _extract_relations_by_window(
+        self, text: str, characters: list[str]
+    ) -> List[Relation]:
+        """旧的 100 字滑动窗口共现（保留作对比基线，默认不再调用）。"""
         relations: List[Relation] = []
         window_size = 100  # 字符窗口
 
@@ -279,19 +306,26 @@ class RelationshipExtractor(BaseRelationshipExtractor):
                         source=chars_in_window[j],
                         target=chars_in_window[k],
                         type=relation_type,
+                        # context_snippet 是"能指回原文的那句话"。原来只有 LLM 分支
+                        # 赋值，规则分支恒为空串，下游证据栏/RAG 提示永远是空。
+                        context_snippet=window.strip()[:120],
                         context=window.strip()[:200],
                         position=i,
                         location="未知"
                     ))
 
-        # 去重：相同人物对只保留首次出现
-        seen_pairs: set[tuple[str, str]] = set()
+        # 去重：同一对人物保留证据最强的 N 条，而不是只留首次出现——
+        # 只留 1 条会把后续互动（态度反转、冲突）全丢掉。
+        max_per_pair = 2
+        kept: dict[tuple[str, str], int] = {}
         unique_relations = []
         for rel in relations:
             pair = tuple(sorted([rel.source, rel.target]))
-            if pair not in seen_pairs:
-                seen_pairs.add(pair)
-                unique_relations.append(rel)
+            n = kept.get(pair, 0)
+            if n >= max_per_pair:
+                continue
+            kept[pair] = n + 1
+            unique_relations.append(rel)
 
         return unique_relations
 
