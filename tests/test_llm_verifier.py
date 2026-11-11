@@ -116,3 +116,55 @@ def test_summary_counts():
     assert s["dropped"] == 1
     assert s["reviewed"] == 1
     assert s["types_after"]["social"] == 1
+
+
+# ---------- 复核强度（strict / normal / loose） ----------
+
+from src.network.llm_verifier import should_keep  # noqa: E402
+
+ASSOC = {"source": "甲", "target": "乙", "type": "association", "weight": 1, "evidence": "x"}
+HOSTILE = {"source": "甲", "target": "乙", "type": "hostile", "weight": 1, "evidence": "甲骂了乙"}
+
+
+def test_strict_drops_everything_model_rejects():
+    v = {"valid": False, "type": "association", "reason": "同校而已"}
+    assert should_keep(ASSOC, v, "strict") is False
+    assert should_keep(HOSTILE, v, "strict") is False
+
+
+def test_normal_keeps_association_edges():
+    v = {"valid": False, "type": "association", "reason": "单方评价外貌"}
+    assert should_keep(ASSOC, v, "normal") is True
+    assert should_keep(HOSTILE, v, "normal") is False
+
+
+def test_loose_only_drops_obvious_misreads():
+    numeric = {"valid": False, "type": "association", "reason": "零是数值，不是人物"}
+    weak = {"valid": False, "type": "association", "reason": "同校而已"}
+    assert should_keep(ASSOC, numeric, "loose") is False
+    assert should_keep(ASSOC, weak, "loose") is True
+
+
+def test_no_verdict_always_kept():
+    assert should_keep(ASSOC, None, "strict") is True
+
+
+def test_valid_true_always_kept():
+    v = {"valid": True, "type": "social", "reason": ""}
+    for s in ("strict", "normal", "loose"):
+        assert should_keep(ASSOC, v, s) is True
+
+
+def test_unknown_strength_rejected():
+    with pytest.raises(ValueError):
+        should_keep(ASSOC, {"valid": False}, "super-strict")
+
+
+def test_review_candidates_applies_strength():
+    replies = ['{"valid": false, "type": "association", "reason": "同校而已"}'] * 3
+    fake = FakeExtractor(list(replies))
+    strict = review_candidates(fake, CANDIDATES, strength="strict")
+    assert len(strict) == 0  # 三条里两条 association + 一条 dialogic 都被删
+    fake2 = FakeExtractor(list(replies))
+    normal = review_candidates(fake2, CANDIDATES, strength="normal")
+    assert len(normal) == 1  # 只有那 1 条 association 被保住
