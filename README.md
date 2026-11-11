@@ -125,8 +125,46 @@ python -m pytest tests -q      # 38 passed
 | 人工标定 8 句方向 | **8/8 = 100%** |
 | 人工标定 8 句类型 | **8/8 = 100%** |
 | 龙族前 6 章（13 人） | 有向边 **53** 条，带具体类型 **27** 条（51%），其余 26 条是 `association` |
-| pytest | **38 passed** |
+| pytest | **46 passed** |
 
 > 这条验收线偏乐观：标定句是照着"主谓宾"写法的典型句。真实长文里 `association`
 > 仍占一半，因为大量句子是"两个人名同现 + 没有谓词"（如"路明非和陈雯雯的对话记录"）。
+
+---
+
+## LLM 复核候选边（可选）
+
+`src/network/llm_verifier.py`：规则版先给候选边，模型只回答「这条关系在证据句里成立吗、
+类型对不对」，比从零抽取便宜。
+
+```python
+from src.network.relations import LLMRelationshipExtractor
+from src.network.llm_verifier import review_candidates, summarize_review
+
+verifier = LLMRelationshipExtractor()          # 无 key 时 available=False
+kept = review_candidates(verifier, candidates) # 无 key 时原样返回，不发任何请求
+print(summarize_review(candidates, kept))
+```
+
+### 在《龙族》前 6 章上的复核结果（人工充当复核方，逐条读证据句判定）
+
+| 指标 | 结果 |
+|---|---|
+| 候选边 | 53 |
+| 判定后保留 | **42**（剔除 11 条 = 21%） |
+| 类型被纠正 | **16** 条 |
+| 模型判不成立的主因 | "两人只是同句出现，没有互动"（9/11） |
+
+被剔除的典型例子：
+
+| 边 | 原文依据 | 剔除理由 |
+|---|---|---|
+| 零 → 路明非 | "出枪速度**为零**" | "零"是数值，不是人物 |
+| 陈雯雯 → 路明非（affection） | "**如果**陈雯雯…喜欢路明非三年了" | 假设语气，未发生 |
+| 路明非 → 陈雯雯（hostile） | "路明非上去**打岔**" | "打岔"是想听她说话，不是冲突 |
+| 路鸣泽 → 路明非（kinship） | "…让路鸣泽一时没忍住笑了起来" | 同场笑，无亲属表述 |
+
+> 注意：这次复核由人工完成（逐条读证据句），不是模型跑出来的。
+> 换到真实模型上，数字会变——收录这个结果是为了证明**复核这一步有实质收益**，
+> 以及给 `llm_verifier.py` 的接口定下输入输出。
 > 类型细化仍需真的句法或 LLM 抽取器；`directed=False` 可退回句级版本做对比。

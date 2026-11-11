@@ -4,6 +4,7 @@
 """
 
 import json
+import os
 import hashlib
 from typing import Any, List
 from pydantic import BaseModel
@@ -15,14 +16,56 @@ from ..interfaces import BaseRelationshipExtractor
 from .sentence_relations import extract_sentence_relations
 
 class LLMRelationshipExtractor(BaseRelationshipExtractor):
-    """基于大模型的人物关系抽取器"""
-    
-    def __init__(self, api_key: str, base_url: str = "https://api.deepseek.com"):
-        from openai import OpenAI
-        self.client = OpenAI(api_key=api_key, base_url=base_url)
-        # 初始化本地磁盘缓存，用于断点续传
-        self.cache = Cache(".llm_cache/relations")
-        
+    """基于大模型的人物关系抽取器
+
+    客户端与磁盘缓存都是**首次调用时才建**：原来在 __init__ 里直接
+    `OpenAI(api_key=...)`，导致没有 key 的环境连 import 该模块都会炸，
+    也让"规则版 + LLM 复核"的混合模式无法做到"没配 key 就自动跳过"。
+    """
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        base_url: str = "https://api.deepseek.com",
+        model: str = "deepseek-chat",
+        cache_dir: str = ".llm_cache/relations",
+    ):
+        self.api_key = api_key or os.getenv("DEEPSEEK_API_KEY") or os.getenv("OPENAI_API_KEY")
+        self.base_url = base_url
+        self.model = model
+        self.cache_dir = cache_dir
+        self._client = None
+        self._cache = None
+
+    @property
+    def available(self) -> bool:
+        """是否具备调用条件（有 key 且能 import openai）。"""
+        if not self.api_key:
+            return False
+        try:
+            import openai  # noqa: F401
+        except ImportError:
+            return False
+        return True
+
+    @property
+    def client(self):
+        if self._client is None:
+            from openai import OpenAI
+
+            if not self.api_key:
+                raise RuntimeError(
+                    "LLMRelationshipExtractor 需要 api_key（或环境变量 DEEPSEEK_API_KEY）"
+                )
+            self._client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+        return self._client
+
+    @property
+    def cache(self):
+        if self._cache is None:
+            self._cache = Cache(self.cache_dir)
+        return self._cache
+
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=2, min=4, max=30),
@@ -31,14 +74,14 @@ class LLMRelationshipExtractor(BaseRelationshipExtractor):
     def _call_llm_with_retry(self, prompt: str) -> str:
         """带重试机制和断点续传缓存的 LLM 调用"""
         # 使用 Prompt 和模型参数的组合哈希作为缓存 Key，防止未来更换模型时读取了旧缓存
-        cache_key_content = f"deepseek-chat_temp0.1_{prompt}"
+        cache_key_content = f"{self.model}_temp0.1_{prompt}"
         prompt_hash = hashlib.md5(cache_key_content.encode('utf-8')).hexdigest()
         
         if prompt_hash in self.cache:
             return self.cache[prompt_hash]
             
         response = self.client.chat.completions.create(
-            model="deepseek-chat",
+            model=self.model,
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
             temperature=0.1,
