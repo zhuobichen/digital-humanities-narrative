@@ -7,6 +7,8 @@ from typing import Any, Optional, Dict
 from datetime import datetime
 
 from .base import NamedEntityRecognizer, CharacterAliasResolver, ChineseTextProcessor
+from .base.alias_rules import build_explicit_mapping, merge_into_canonical
+from .base.entity_filter import filter_persons
 from .network import RelationshipExtractor, LLMRelationshipExtractor, CharacterNetworkBuilder, NetworkVisualizer
 from .plot import TimelineExtractor, CausalChainAnalyzer
 from .character import CharacterProfiler, LLMCharacterProfiler, RelationshipDynamicsAnalyzer
@@ -66,6 +68,8 @@ class NarrativePipeline:
         self.text_processor = ChineseTextProcessor()
         self.convert_traditional = convert_traditional
         self.explicit_mapping = explicit_mapping
+        # 书名用于挑选"非人物停用表"（卡塞尔这类地名/组织名不该进图谱）
+        self.book = ""
         self.causal_analyzer = CausalChainAnalyzer()
         self.dynamics_analyzer = RelationshipDynamicsAnalyzer()
         self.destiny_predictor = DestinyPredictor()
@@ -92,15 +96,21 @@ class NarrativePipeline:
             print("[Phase 1/5] 人物识别与别名合并...")
 
         all_text = "\n".join(converted_texts)
+        self.book = book
         raw_characters = self.ner.extract_characters(all_text)
+        # 词典里混进的地名/组织名（如"卡塞尔"）不该进人物网络
+        raw_characters = filter_persons(raw_characters, self.book)
 
         # 别名合并
         if self.explicit_mapping:
-            alias_groups = [{"canonical_name": k, "aliases": v} for k, v in self.explicit_mapping.items()]
+            alias_groups = [
+                {"canonical_name": k, "aliases": v}
+                for k, v in build_explicit_mapping(self.explicit_mapping).items()
+            ]
+            characters = merge_into_canonical(raw_characters, self.explicit_mapping)
         else:
             alias_groups = self.alias_resolver.resolve_aliases(all_text, raw_characters)
-            
-        characters = self.alias_resolver.merge_aliases(raw_characters, alias_groups)
+            characters = self.alias_resolver.merge_aliases(raw_characters, alias_groups)
 
         # 统一文本中的称呼（将别名替换为规范名）
         alias_map = {}
@@ -114,14 +124,10 @@ class NarrativePipeline:
         sorted_aliases = sorted(alias_map.keys(), key=len, reverse=True)
         
         def replace_aliases(text: str) -> str:
-            # 一个简单的多遍替换策略，避免嵌套替换问题
+            # 别名按长度降序，单遍替换：长别名先替换成规范名，短别名不会再命中
+            # 规范名的内部子串（例如"诺诺"→"陈墨瞳"之后，不会再被其他别名拆开）。
             for alias in sorted_aliases:
-                canonical = alias_map[alias]
-                # 先把规范名替换为占位符，防止被子串替换
-                placeholder = f"__CANONICAL_{hash(canonical)}__"
-                text = text.replace(canonical, placeholder)
-                text = text.replace(alias, canonical)
-                text = text.replace(placeholder, canonical)
+                text = text.replace(alias, alias_map[alias])
             return text
 
         all_text = replace_aliases(all_text)
