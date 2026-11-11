@@ -43,11 +43,12 @@ streamlit run app.py
 
 ```bash
 pip install -r requirements.txt && pip install pytest
-python -m pytest tests -q      # 19 passed
+python -m pytest tests -q      # 38 passed
 ```
 
 - `tests/conftest.py` 提供 NER / 别名 / 关系 / 事件 / 画像 / 链路的夹具。
 - `tests/test_alias_rules.py` 覆盖别名合并与非人物过滤。
+- `tests/test_sentence_relations.py` / `tests/test_directed_relations.py` 覆盖句级共现与有向关系。
 
 ### 依赖是可选的，不是硬门槛
 
