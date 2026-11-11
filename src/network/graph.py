@@ -15,16 +15,29 @@ class CharacterNetworkBuilder:
     def __init__(self):
         self.G: nx.Graph | None = None
 
-    def build_network(self, relations: List[Relation]) -> nx.Graph:
+    def build_network(
+        self,
+        relations: List[Relation],
+        extra_characters: list[str] | None = None,
+        set_as_current: bool = True,
+    ) -> nx.Graph:
         """从关系列表构建社交网络
 
         Args:
             relations: RelationshipExtractor 输出的 Relation 对象列表
+            extra_characters: 额外要放进图里的孤立人物（没有关系的角色，
+                不传就会在可视化里凭空消失，人数和画像对不上）
+            set_as_current: 是否把结果写回 self.G。时间轴快照这类"临时图"必须传
+                False——否则最后一次快照会把主图覆盖成残缺版本（可视化跟着错）
 
         Returns:
             NetworkX 图对象
         """
         G = nx.Graph()
+
+        for name in extra_characters or []:
+            if name and name not in G:
+                G.add_node(name, type="character", locations=[])
 
         for rel in relations:
             source = rel.source
@@ -100,7 +113,8 @@ class CharacterNetworkBuilder:
             else:
                 G.nodes[node]["top_locations"] = []
 
-        self.G = G
+        if set_as_current:
+            self.G = G
         return G
 
     def analyze_network(self) -> NetworkStats:

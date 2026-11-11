@@ -165,7 +165,8 @@ class NarrativePipeline:
             if verbose:
                 print(f"  块 {i+1}/{len(converted_texts)} 提取完毕, 新增关系数: {len(rels)}")
 
-        G = self.network_builder.build_network(relations)
+        # 把没有关系的角色也放进图里，否则可视化/统计里人数会和画像对不上
+        G = self.network_builder.build_network(relations, extra_characters=characters)
         stats = self.network_builder.analyze_network()
         
         from src.models import NetworkAnalysis
@@ -210,7 +211,7 @@ class NarrativePipeline:
                         accumulated_rels.extend(chunk_relations[idx])
                         
                     # 构建到当前阶段的增量图谱
-                    stage_G = self.network_builder.build_network(accumulated_rels)
+                    stage_G = self.network_builder.build_network(accumulated_rels, set_as_current=False)
                     stage_data = nx.node_link_data(stage_G)
                     temporal_graphs.append({
                         "stage": stage + 1,
