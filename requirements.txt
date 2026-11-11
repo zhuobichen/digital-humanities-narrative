@@ -36,6 +36,7 @@ streamlit>=1.30
 pyecharts>=2.0
 fastapi>=0.110
 uvicorn>=0.29
+python-multipart>=0.0.9   # FastAPI 表单上传必需，缺了 import 就 RuntimeError
 chromadb>=0.4
 sentence-transformers>=2.6
 opencc>=1.1

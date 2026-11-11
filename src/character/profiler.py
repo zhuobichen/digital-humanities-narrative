@@ -42,7 +42,10 @@ class LLMCharacterProfiler(BaseCharacterProfiler):
                     name=name,
                     role_in_story=role,
                     total_mentions=char_counts[name],
-                    presence_ratio=char_counts[name] / max(len(texts), 1),
+                    # presence_ratio 是"在多少段文本里出现过"的占比，不是字数占比。
+                    # 原来用 char_counts / len(texts)，而 texts 只是"段数"（长文往往 1 段），
+                    # 导致任何出现过的角色都被算成 1.0。
+                    presence_ratio=sum(1 for t in texts if name in t) / max(len(texts), 1),
                     traits=Traits(),
                     emotions=EmotionProfile(),
                     communication_style=CommunicationStyle(),
@@ -131,9 +134,19 @@ class LLMCharacterProfiler(BaseCharacterProfiler):
         name: str,
         character_texts: list[str],
         all_texts: list[str],
-        all_characters: list[str],
+        all_characters: list[str] = (),
     ) -> str:
         total_texts = max(len(all_texts), 1)
+        # 长文常常只有 1 段，这时"出场段数/总段数"恒为 1，角色就全成了主角。
+        # 有多个角色可比时，改用"出现次数占全体比重"来分档。
+        if total_texts <= 1 and all_characters:
+            counts = {c: sum(t.count(c) for t in all_texts) for c in all_characters}
+            total_mentions = sum(counts.values()) or 1
+            share = counts.get(name, 0) / total_mentions
+            for role in ("protagonist", "supporting", "minor"):
+                if share > self.role_thresholds[role]:
+                    return role
+            return "background"
         presence = len(character_texts) / total_texts
         if presence > self.role_thresholds["protagonist"]:
             return "protagonist"
@@ -335,6 +348,18 @@ class CharacterProfiler(BaseCharacterProfiler):
     ) -> str:
         """推断人物在故事中的角色"""
         total_texts = max(len(all_texts), 1)
+
+        # 长文常常只有 1 段，这时"出场段数/总段数"恒为 1，所有角色都会变成主角。
+        # 有多个角色可比时，改用"出现次数占全体比重"分档，段数维度只做兜底。
+        if total_texts <= 1 and all_characters:
+            counts = {c: sum(t.count(c) for t in all_texts) for c in all_characters}
+            total_mentions = sum(counts.values()) or 1
+            share = counts.get(name, 0) / total_mentions
+            for role in ("protagonist", "supporting", "minor"):
+                if share > self.role_thresholds[role]:
+                    return role
+            return "background"
+
         presence = len(character_texts) / total_texts
 
         # 检查被他人提及的频率

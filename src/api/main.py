@@ -235,10 +235,29 @@ async def get_task_results(task_id: str):
         
     return task_info["results"]
 
-from src.simulation.sandbox import SandboxRequest, MultiAgentSandbox
+from typing import Any as _Any
+from pydantic import BaseModel as _BaseModel
+
+
+class SandboxRequest(_BaseModel):
+    """多智能体沙盘请求（延迟导入 chromadb 的容错版本）。"""
+
+    task_id: str
+    rounds: int = 3
+    focus_characters: list[str] = []
+
 
 @app.post("/api/v1/simulation/run")
 async def run_simulation(req: SandboxRequest):
+    # chromadb 是重依赖（数百 MB），只在真正调用沙盘时才导入，
+    # 否则不碰 RAG 的 upload/status/results 也会被拖到起不来。
+    try:
+        from src.simulation.sandbox import MultiAgentSandbox
+    except ImportError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"沙盘功能依赖未安装（{exc.name}），请 pip install chromadb",
+        ) from exc
     task_data = tasks_db.get(req.task_id)
     if task_data is None:
         raise HTTPException(status_code=404, detail="Task not found")

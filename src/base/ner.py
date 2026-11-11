@@ -36,14 +36,24 @@ class NamedEntityRecognizer:
             return  # Skip loading models
 
         if backend == "spacy":
+            # spaCy 与中文模型是可选依赖：缺了不该让整条流水线起不来，
+            # 降级成纯词典后端（同时把 backend 改成 dict，免得后续分支用错）。
             try:
                 import spacy
+
                 self._nlp = spacy.load(model_name or "zh_core_web_sm")
-                self._nlp.max_length = 2000000 # 增加 max_length 以支持长文本
-            except OSError:
-                raise RuntimeError(
-                    "未找到 spaCy 中文模型。请运行: python -m spacy download zh_core_web_sm"
+                self._nlp.max_length = 2000000  # 增加 max_length 以支持长文本
+            except (ImportError, OSError) as exc:
+                import warnings
+
+                warnings.warn(
+                    f"spaCy 后端不可用（{exc.__class__.__name__}: {exc}），降级为词典模式。"
+                    "启用模型：pip install spacy && python -m spacy download zh_core_web_sm",
+                    RuntimeWarning,
+                    stacklevel=2,
                 )
+                self.backend = "dict"
+                self._nlp = None
         elif backend == "transformers":
             self.model_name = model_name or "ckiplab/bert-base-chinese-ner"     
         else:
@@ -71,7 +81,7 @@ class NamedEntityRecognizer:
                 if name in text:
                     results.add(name)
 
-        if self.strict_dict_mode:
+        if self.strict_dict_mode or self.backend == "dict":
             return list(results)
 
         # 2. spaCy NER

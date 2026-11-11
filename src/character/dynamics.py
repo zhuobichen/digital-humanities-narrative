@@ -64,7 +64,8 @@ class RelationshipDynamicsAnalyzer:
         """从关系列表直接分析
 
         Args:
-            relations: RelationshipExtractor 输出的关系列表
+            relations: RelationshipExtractor 输出的关系列表；元素可以是
+                Relation 对象，也可以是已经 model_dump() 过的 dict。
 
         Returns:
             关系演变分析结果
@@ -72,8 +73,23 @@ class RelationshipDynamicsAnalyzer:
         # 按人物对分组
         grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
         for rel in relations:
-            pair = tuple(sorted([rel["source"], rel["target"]]))
-            grouped[pair].append(rel)
+            # 上游返回 Pydantic 对象，测试与旧调用方传 dict；统一成 field 取值，
+            # 否则这里会直接 TypeError: 'Relation' object is not subscriptable。
+            def _field(obj, name, default=""):
+                if isinstance(obj, dict):
+                    return obj.get(name, default)
+                return getattr(obj, name, default)
+
+            item = {
+                "source": _field(rel, "source"),
+                "target": _field(rel, "target"),
+                "type": _field(rel, "type", "unknown"),
+                "context": _field(rel, "context"),
+                "context_snippet": _field(rel, "context_snippet"),
+                "position": _field(rel, "position", 0),
+            }
+            pair = tuple(sorted([item["source"], item["target"]]))
+            grouped[pair].append(item)
 
         return self.analyze_evolution(grouped)
 

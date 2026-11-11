@@ -46,3 +46,14 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
+
+# 运行时产物（跑测试/API/流水线会生成）
+jieba.cache
+tasks.db
+*.db
+out/
+tmp*/
+_probe*.py
+
+# 本地评测语料：版权作品正文，不入库
+data/
